@@ -4,13 +4,12 @@ import asks
 import trio
 import settings
 import secrets
+import datetime
 try:
     import googleclouddebugger
     googleclouddebugger.enable()
 except ImportError:
     pass
-from celery import Celery, group
-from celery.decorators import task
 from flask_bootstrap import Bootstrap
 from flask_wtf import FlaskForm
 from wtforms import TextAreaField, SubmitField
@@ -23,8 +22,6 @@ print("libraries loaded...")
 app = Flask(__name__, static_url_path="/static")
 Bootstrap(app)
 app.config["SECRET_KEY"] = secrets.token_hex()
-
-celery_app = Celery("compare", backend="rpc://", broker=settings.local_broker)
 
 
 class WebForm(FlaskForm):
@@ -43,21 +40,63 @@ class WebForm(FlaskForm):
 
 
 @app.route("/", methods=["GET", "POST"])
-def index():
+def index(payload=None, in_seconds=None):
     """ display index page """
     print("index function called...")
     form = WebForm()
     if request.method == "POST" and form.validate_on_submit():
-        celery_app.control.purge()
         inp = form.web_abstract_var.data
         print(inp)
         t0 = datetime.now()
 
-        # do the work
-        job = group([storageio.s(blob, inp) for blob in settings.bucket_list])
-        result = job.apply_async()
-        result = result.get()
 
+        from google.cloud import tasks_v2
+        from google.protobuf import timestamp_pb2
+
+        # Create a client.
+        client = tasks_v2.CloudTasksClient()
+
+        for blob in settings.bucket_list:
+            project = 'doaj-262414'
+            queue = 'doaj-q'
+            location = 'us-east4'
+            payload = '{"d": inp, "f": blob}'
+
+            # Construct the fully qualified queue name.
+            parent = client.queue_path(project, location, queue)
+
+            # Construct the request body.
+            task = {
+                    'http_request': {  # Specify the type of request.
+                        'http_method': 'POST',
+                        'url': 'https://us-east4-doaj-262414.cloudfunctions.net/doaj-trio'
+                    }
+            }
+            if payload is not None:
+                # The API expects a payload of type bytes.
+                converted_payload = payload.encode()
+
+                # Add the payload to the request.
+                task['http_request']['body'] = converted_payload
+
+            if in_seconds is not None:
+                # Convert "seconds from now" into an rfc3339 datetime string.
+                d = datetime.datetime.utcnow() + datetime.timedelta(seconds=in_seconds)
+
+                # Create Timestamp protobuf.
+                timestamp = timestamp_pb2.Timestamp()
+                timestamp.FromDatetime(d)
+
+                # Add the timestamp to the tasks.
+                task['schedule_time'] = timestamp
+
+            # Use the client to build and send the task.
+            response = client.create_task(parent, task)
+
+            print('Created task {}'.format(response.name))
+
+
+        # do the work
         scores = sorted(result, key=lambda t: t[1], reverse=True)
 
         output = {}
@@ -72,16 +111,13 @@ def index():
         return render_template("index.html", form=form, errors={}, output=sorted_output)
 
     elif request.method == "POST" and not form.validate_on_submit():
-        celery_app.control.purge()
         return render_template("index.html", form=form, errors=form.errors, output="")
 
     else:
         print("at render...")
-        #celery_app.control.purge()
         return render_template("index.html", form=form, errors={}, output="")
 
 
-@task(name="access_storage")
 def storageio(blob, inp):
     """ interact with google cloud function """
     status = 0
