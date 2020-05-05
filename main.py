@@ -4,13 +4,13 @@ import asks
 import trio
 import settings
 import secrets
+import json
 try:
     import googleclouddebugger
     googleclouddebugger.enable()
 except ImportError:
     pass
-from celery import Celery, group
-from celery.decorators import task
+from google.cloud import pubsub_v1
 from flask_bootstrap import Bootstrap
 from flask_wtf import FlaskForm
 from wtforms import TextAreaField, SubmitField
@@ -24,7 +24,8 @@ app = Flask(__name__, static_url_path="/static")
 Bootstrap(app)
 app.config["SECRET_KEY"] = secrets.token_hex()
 
-celery_app = Celery("compare", backend="rpc://", broker=settings.local_broker)
+publisher = pubsub_v1.PublisherClient()
+topic_path = publisher.topic_path(settings.project_id, settings.topic_name)
 
 
 class WebForm(FlaskForm):
@@ -48,15 +49,24 @@ def index():
     print("index function called...")
     form = WebForm()
     if request.method == "POST" and form.validate_on_submit():
-        celery_app.control.purge()
+        futures = dict()
         inp = form.web_abstract_var.data
         print(inp)
         t0 = datetime.now()
 
         # do the work
-        job = group([storageio.s(blob, inp) for blob in settings.bucket_list])
-        result = job.apply_async()
-        result = result.get()
+        for blob in settings.bucket_list:
+            data = json.dumps({"d": inp, "f": blob})
+            futures.update({data: None})
+            future = publisher.publish(topic_path, data=data.encode('utf-8'))
+            print(future.result())
+            futures[data] = future
+            future.add_done_callback(get_callback(future, data))
+
+        while futures:
+            time.sleep(5)
+
+        print("did pubsub")
 
         scores = sorted(result, key=lambda t: t[1], reverse=True)
 
@@ -72,27 +82,28 @@ def index():
         return render_template("index.html", form=form, errors={}, output=sorted_output)
 
     elif request.method == "POST" and not form.validate_on_submit():
-        celery_app.control.purge()
         return render_template("index.html", form=form, errors=form.errors, output="")
 
     else:
         print("at render...")
-        #celery_app.control.purge()
         return render_template("index.html", form=form, errors={}, output="")
 
+def get_callback(f, data):
+    def callback(f):
+        try:
+            #print(f.result())
+            futures.pop(data)
+        except:  # noqa
+            #print("Please handle {} for {}.".format(f.exception(), data))
+            pass
+    return callback
 
+"""
 @task(name="access_storage")
 def storageio(blob, inp):
-    """ interact with google cloud function """
-    status = 0
-    max_out = 0
-    while (status != 200) and (max_out < 10):
-        with requests.post(settings.cloud_function, json={"d": inp, "f": blob}) as resp:
-            print(resp.status_code, blob)
-            status = resp.status_code
-            max_out += 1
-    return (blob[10:19], resp.text)
 
+    return (blob[10:19], resp.text)
+"""
 
 def test_response(resp):
     """ some abstract collections raise ValueErrors. Ignore these. """
