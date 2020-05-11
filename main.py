@@ -5,11 +5,11 @@ import trio
 import settings
 import secrets
 import datetime
-try:
-    import googleclouddebugger
-    googleclouddebugger.enable()
-except ImportError:
-    pass
+#try:
+#    import googleclouddebugger
+#    googleclouddebugger.enable()
+#except ImportError:
+#    pass
 from flask_bootstrap import Bootstrap
 from flask_wtf import FlaskForm
 from wtforms import TextAreaField, SubmitField
@@ -53,15 +53,14 @@ def index(payload=None, in_seconds=None):
         from google.cloud import tasks_v2
         from google.protobuf import timestamp_pb2
 
-        # Create a client.
-        client = tasks_v2.CloudTasksClient()
 
         for blob in settings.bucket_list:
+            client = tasks_v2.CloudTasksClient()
             project = 'doaj-262414'
             queue = 'doaj-q'
             location = 'us-east4'
             payload = '{"d": inp, "f": blob}'
-
+            
             # Construct the fully qualified queue name.
             parent = client.queue_path(project, location, queue)
 
@@ -69,15 +68,10 @@ def index(payload=None, in_seconds=None):
             task = {
                     'http_request': {  # Specify the type of request.
                         'http_method': 'POST',
-                        'url': 'https://us-east4-doaj-262414.cloudfunctions.net/doaj-trio'
-                    }
+                        'url': 'https://us-east4-doaj-262414.cloudfunctions.net/doaj-trio',
+                        'body': payload.encode()
+                    },
             }
-            if payload is not None:
-                # The API expects a payload of type bytes.
-                converted_payload = payload.encode()
-
-                # Add the payload to the request.
-                task['http_request']['body'] = converted_payload
 
             if in_seconds is not None:
                 # Convert "seconds from now" into an rfc3339 datetime string.
@@ -94,6 +88,7 @@ def index(payload=None, in_seconds=None):
             response = client.create_task(parent, task)
 
             print('Created task {}'.format(response.name))
+            print(response)
 
 
         # do the work
